@@ -81,8 +81,8 @@ This file controls your local environment. You can edit it manually to tweak adv
 ```json
 "Batch": {
     "TargetFolders": [
-        "G:\\English TV",
-        "H:\\Movies"
+        "X:\\Folder",
+        "Y:\\Folder"
     ],
     "SortOrder": "SmallestFirst",       // Options: SmallestFirst, LargestFirst, Alphabetical
     "RunWindowStart": "23:00",          // Start time (24h)
