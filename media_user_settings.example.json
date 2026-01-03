@@ -1,0 +1,25 @@
+{
+  "TargetFolders": [
+    "X:\\Media\\Movies",
+    "Y:\\Media\\TV"
+  ],
+  "Tools": {
+    "HandBrakeCli": "HandBrakeCLI.exe",
+    "Ffprobe": "ffprobe.exe"
+  },
+  "Shrink": {
+    "TempPath": "",
+    "RecentlyModifiedSkipMinutes": 15,
+    "ResourceMode": "Medium",
+    "DolbyVisionPolicy": "RequirePreserve"
+  },
+  "Batch": {
+    "SkipFilesNewerThanDays": 15,
+    "DriveSchedulingMode": "PerfCounterLeastBusy",
+    "ExcludeNameRegex": "^hb_temp_|sample|trailer",
+    "MaxFilesPerRun": 0,
+    "RunWindowStart": "00:00",
+    "RunWindowEnd": "24:00",
+    "MinFreeSpaceGB": 50
+  }
+}

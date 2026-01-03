@@ -1,0 +1,24 @@
+# User-specific settings (generated on first run)
+media_user_settings.json
+
+# Logs / reports
+shrink_log.csv
+missing_audio_report.csv
+wrong_language_report.csv
+savings_report.csv
+*_missing_audio.csv
+*_wrong_language.csv
+*_savings_report.csv
+*.log
+
+# History / state
+optimized_history.txt
+*.lock
+
+# Backups / temp artifacts
+*.bak
+hb_temp_*
+temp_*
+
+# Release bundles
+*.zip
