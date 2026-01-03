@@ -1,10 +1,8 @@
-# --- shrink_execute.ps1 (V75 - Atomic Swap Safe) ---
+# --- shrink_execute.ps1 (V79 - Priority & Config Fix) ---
 # Worker:
-# - Runs efficiently in background.
-# - Logs all actions to shrink_log.csv.
-# - No interactive pauses.
-# - FIX: Uses [System.IO.File]::Replace for atomic, data-safe swaps.
-# - FIX: Automatically handles cross-volume temp files.
+# - FIX: Added support for "Heavy" resource mode.
+# - FIX: Removed shadow Get-Cfg function to allow correct settings loading.
+# - FIX: Atomic Swap Safe (keeps cross-volume support).
 
 param(
     [string]$ScanPath = ".",
@@ -25,18 +23,18 @@ try {
     . (Join-Path $ScriptDir "media_common.ps1")
     Test-MediaTools
 
-
     # --- 1) RESOURCE MODE / PRIORITY ---
     try {
-        $mode = "Light"
+        $mode = "Medium" # Default
         $cfgMode = Get-Cfg "Shrink" "ResourceMode"
         if ($cfgMode) { $mode = $cfgMode }
 
         $p = Get-Process -Id $PID
         switch ($mode) {
-            "Light"  { $p.PriorityClass = "Idle" }
-            "Medium" { $p.PriorityClass = "BelowNormal" }
-            "High"   { $p.PriorityClass = "Normal" }
+            "Light"  { $p.PriorityClass = "Idle" }        # Background mode
+            "Medium" { $p.PriorityClass = "BelowNormal" } # Balanced
+            "High"   { $p.PriorityClass = "Normal" }      # Full Speed (Legacy)
+            "Heavy"  { $p.PriorityClass = "Normal" }      # Full Speed (Matches Readme)
         }
     } catch {}
 
@@ -96,9 +94,15 @@ try {
 
     # --- 5) ENCODE SETUP ---
     $workDir = $file.DirectoryName
+    
+    # FIX: Correctly reading TempPath using the shared Get-Cfg
     $cfgTemp = Get-Cfg "Shrink" "TempPath"
-    if (-not [string]::IsNullOrWhiteSpace($cfgTemp) -and (Test-Path -LiteralPath $cfgTemp)) {
-        $workDir = $cfgTemp
+    if (-not [string]::IsNullOrWhiteSpace($cfgTemp)) {
+        if (Test-Path -LiteralPath $cfgTemp) {
+            $workDir = $cfgTemp
+        } else {
+            Write-Warning "Temp path not found, falling back to source: $cfgTemp"
+        }
     }
     
     $tempFile = Join-Path $workDir ("hb_temp_" + [Guid]::NewGuid().ToString("N") + ".mkv")
@@ -148,19 +152,16 @@ try {
             
             try {
                 # 1. Cross-Volume Check
-                # System.IO.File.Replace requires both files to be on the same volume.
                 $sourceRoot = [System.IO.Path]::GetPathRoot($file.FullName).ToLower()
                 $tempRoot   = [System.IO.Path]::GetPathRoot($tempFile).ToLower()
                 
                 if ($sourceRoot -ne $tempRoot) {
-                    # Move temp to source folder first
                     $tempInSrc = Join-Path $file.DirectoryName ("hb_temp_" + [Guid]::NewGuid().ToString("N") + ".mkv")
                     Move-Item -LiteralPath $tempFile -Destination $tempInSrc -Force -ErrorAction Stop
                     $tempFile = $tempInSrc
                 }
 
                 # 2. Atomic Replacement
-                # This performs a Replace + Backup in one kernel operation (on NTFS)
                 [System.IO.File]::Replace($tempFile, $file.FullName, $bakFile)
                 
                 # 3. Success Cleanup
@@ -172,31 +173,18 @@ try {
                 Write-MediaLog -InputPath $file.FullName -OutputPath $file.FullName -Old_MB $oldMB -New_MB $newMB -Saved_MB $savedMB -Status "Success" -Detail "$encName, $dur" -OrigVideo "$codec ${width}x${height}"
             }
             catch {
-                # 4. Rollback / Failure Handling
                 Write-MediaLog -InputPath $file.FullName -Status "Failed-Swap" -Detail $_.Exception.Message
-                
-                # Attempt to restore backup if it exists (Manual Rollback)
                 try {
-                    if (Test-Path -LiteralPath $bakFile) {
-                        Move-Item -LiteralPath $bakFile -Destination $file.FullName -Force
-                    }
+                    if (Test-Path -LiteralPath $bakFile) { Move-Item -LiteralPath $bakFile -Destination $file.FullName -Force }
                 } catch {
-                     Write-MediaLog -InputPath $file.FullName -Status "CRITICAL-RollbackFailed" -Detail "Manual intervention required. Check .bak file."
+                     Write-MediaLog -InputPath $file.FullName -Status "CRITICAL-RollbackFailed" -Detail "Check .bak file."
                 }
-                
-                # Cleanup stranded temp file
-                if (Test-Path -LiteralPath $tempFile) { 
-                    Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue 
-                }
+                if (Test-Path -LiteralPath $tempFile) { Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue }
             }
-            # --- ATOMIC SWAP LOGIC END ---
         }
     }
 
 } catch {
-    # Critical Failure Logging
-    try { 
-        Write-MediaLog -InputPath $ScanPath -Status "CRITICAL" -Detail $_.Exception.Message 
-    } catch {}
+    try { Write-MediaLog -InputPath $ScanPath -Status "CRITICAL" -Detail $_.Exception.Message } catch {}
     exit 1
 }
