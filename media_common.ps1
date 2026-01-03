@@ -14,22 +14,38 @@ $ConfigFile = Join-Path $Global:ToolsDir "media_config.ps1"
 if (-not (Test-Path -LiteralPath $ConfigFile)) { throw "Missing config file: $ConfigFile" }
 $Global:MediaConfig = . $ConfigFile
 
+# --- media_common.ps1 ---
+
+# ... (Keep the Config Loader section at the top)
+
 function Merge-Config {
     param($Target, $Source)
     if (-not $Source) { return }
+    
     $keys = if ($Source -is [System.Collections.IDictionary]) { $Source.Keys } else { $Source.PSObject.Properties.Name }
+    
     foreach ($key in $keys) {
         $sourceVal = if ($Source -is [System.Collections.IDictionary]) { $Source[$key] } else { $Source.$key }
+        
         if ($Target.Contains($key)) {
             $targetVal = $Target[$key]
             $targetIsDict = ($targetVal -is [System.Collections.IDictionary])
             $sourceIsDict = ($sourceVal -is [System.Collections.IDictionary] -or $sourceVal -is [System.Management.Automation.PSCustomObject])
-            if ($targetIsDict -and $sourceIsDict) { Merge-Config -Target $targetVal -Source $sourceVal }
-            else { $Target[$key] = $sourceVal }
+            
+            if ($targetIsDict -and $sourceIsDict) { 
+                Merge-Config -Target $targetVal -Source $sourceVal 
+            }
+            else { 
+                $Target[$key] = $sourceVal 
+            }
+        }
+        else {
+            # THIS IS THE FIX: Create the key if it's missing!
+            $Target[$key] = $sourceVal
         }
     }
 }
-
+# ... (Rest of file)
 $UserFile = Join-Path $Global:ToolsDir "media_user_settings.json"
 if (Test-Path -LiteralPath $UserFile) {
     try {

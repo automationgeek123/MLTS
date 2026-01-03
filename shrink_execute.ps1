@@ -25,14 +25,6 @@ try {
     . (Join-Path $ScriptDir "media_common.ps1")
     Test-MediaTools
 
-    # Helper for safe config reading
-    function Get-Cfg { param($Key1, $Key2) 
-        if ($Global:MediaConfig.Contains($Key1)) {
-            $k1 = $Global:MediaConfig[$Key1]
-            if ($k1 -is [System.Collections.IDictionary] -and $k1.Contains($Key2)) { return $k1[$Key2] }
-        }
-        return $null
-    }
 
     # --- 1) RESOURCE MODE / PRIORITY ---
     try {

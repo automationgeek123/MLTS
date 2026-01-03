@@ -28,6 +28,17 @@ $MediaSuiteConfig = [ordered]@{
     }
 
     # -----------------------------
+    # SHRINK SETTINGS (Temp Path, etc.)
+    # -----------------------------
+    Shrink = [ordered]@{
+        TempPath = ""
+        ResourceMode = "Medium"
+        RecentlyModifiedSkipMinutes = 15
+        DolbyVisionPolicy = "RequirePreserve"
+    }
+
+    # -----------------------------
+    # -----------------------------
     # VIDEO / ENCODER POLICY
     # -----------------------------
     Media = [ordered]@{
