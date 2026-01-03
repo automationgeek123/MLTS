@@ -1,7 +1,8 @@
-﻿# --- run_batch_job.ps1 (V69 - Final Production) ---
+﻿# --- run_batch_job.ps1 (V70 - Full Wizard + Production) ---
 # Controller:
+# - Setup Wizard: Restored full interactive setup (Tools, Temp, Priority, Filters).
 # - Production Mode: Runs workers HIDDEN (no popup windows).
-# - Safe Config Access: Uses Get-Cfg to prevents Strict Mode crashes.
+# - Safe Config Access: Uses Get-Cfg to prevent Strict Mode crashes.
 # - Logs "Picked" status before execution.
 
 Set-StrictMode -Version Latest
@@ -14,21 +15,74 @@ $CommonFile   = Join-Path $ScriptDir "media_common.ps1"
 $SettingsFile = Join-Path $ScriptDir "media_user_settings.json"
 
 if (-not (Test-Path -LiteralPath $SettingsFile)) {
-    # (Simplified setup logic maintained for safety)
-    $folders = @(); while ($true) { $f = Read-Host "Path to scan"; if (-not $f) { break }; $folders += $f }
-    $def = [ordered]@{ 
-        Tools=@{HandBrakeCli="HandBrakeCLI.exe";Ffprobe="ffprobe.exe"}; 
-        Shrink=@{ResourceMode="Light";TempPath="";DolbyVisionPolicy="RequirePreserve"}; 
-        Batch=@{TargetFolders=$folders;MinFreeSpaceGB=50;SkipFilesNewerThanDays=15;SortOrder="SmallestFirst";RunWindowStart="23:00";RunWindowEnd="07:00"} 
+    Write-Host "--- FIRST RUN SETUP ---" -ForegroundColor Cyan
+    Write-Host "media_user_settings.json not found. Let's create it." -ForegroundColor Gray
+    
+    # 1. Folders
+    $folders = @()
+    Write-Host "`n1. Folders to scan (One per line, Empty line to finish):" -ForegroundColor White
+    while ($true) {
+        $f = Read-Host "   Path"
+        if ([string]::IsNullOrWhiteSpace($f)) { break }
+        $folders += $f
     }
-    $def | ConvertTo-Json -Depth 3 | Set-Content $SettingsFile
+
+    # 2. Tools
+    Write-Host "`n2. Tool Paths (Press Enter for default if in PATH/Folder):" -ForegroundColor White
+    $hb = Read-Host "   HandBrakeCLI.exe path [Default: HandBrakeCLI.exe]"
+    if ([string]::IsNullOrWhiteSpace($hb)) { $hb = "HandBrakeCLI.exe" }
+
+    $ff = Read-Host "   ffprobe.exe path      [Default: ffprobe.exe]"
+    if ([string]::IsNullOrWhiteSpace($ff)) { $ff = "ffprobe.exe" }
+
+    # 3. Temp Path
+    Write-Host "`n3. Transcoding (Press Enter to use source folder):" -ForegroundColor White
+    $tmp = Read-Host "   Temp Folder path"
+
+    # 4. Priority
+    Write-Host "`n4. Resource Mode (Controls Process Priority):" -ForegroundColor White
+    $mode = Read-Host "   [Light, Medium, Heavy] (Default: Medium)"
+    if ([string]::IsNullOrWhiteSpace($mode)) { $mode = "Medium" }
+
+    # 5. Filters
+    Write-Host "`n5. Filters:" -ForegroundColor White
+    $recentMins = Read-Host "   Skip files modified in last N minutes (Download protection) [Default: 15]"
+    if ([string]::IsNullOrWhiteSpace($recentMins)) { $recentMins = 15 }
+
+    $olderDays = Read-Host "   Only process files older than N days (Legacy filter)        [Default: 15]"
+    if ([string]::IsNullOrWhiteSpace($olderDays)) { $olderDays = 15 }
+
+    $defaultSettings = [ordered]@{
+        Tools = @{ 
+            HandBrakeCli = $hb; 
+            Ffprobe = $ff 
+        }
+        Shrink = @{ 
+            TempPath = $tmp; 
+            ResourceMode = $mode; 
+            DolbyVisionPolicy = "RequirePreserve"; 
+            RecentlyModifiedSkipMinutes = [int]$recentMins
+        }
+        Batch = @{ 
+            TargetFolders = $folders; 
+            MinFreeSpaceGB = 50; 
+            SkipFilesNewerThanDays = [int]$olderDays; 
+            SortOrder = "SmallestFirst";
+            RunWindowStart = "23:00"; 
+            RunWindowEnd = "07:00";
+            ExcludeNameRegex = "^hb_temp_|sample|trailer|extras"
+        }
+    }
+    $defaultSettings | ConvertTo-Json -Depth 3 | Set-Content -Path $SettingsFile -Encoding UTF8
+    Write-Host "`nSettings saved! Starting main script..." -ForegroundColor Green
+    Start-Sleep -Seconds 1
 }
 
 . $CommonFile
 Test-MediaTools
 
 $Executor = Join-Path $ScriptDir "shrink_execute.ps1"
-if (-not (Test-Path $Executor)) { throw "Worker script missing: $Executor" }
+if (-not (Test-Path -LiteralPath $Executor)) { throw "Worker script missing: $Executor" }
 $LockFile = Join-Path $ScriptDir "PAUSE.lock"
 $Global:BatchOverrideWindow = $false
 
@@ -84,8 +138,8 @@ $excl = Get-Cfg "Batch" "ExcludeNameRegex"; $skipDays = [int](Get-Cfg "Batch" "S
 
 Write-Host "Scanning..." -ForegroundColor Cyan
 foreach ($folder in $TargetFolders) {
-    if (-not (Test-Path $folder)) { continue }
-    $files = Get-ChildItem $folder -Recurse -File -ErrorAction SilentlyContinue | ? { $Global:ValidExtensions -contains $_.Extension.ToLower() }
+    if (-not (Test-Path -LiteralPath $folder)) { continue }
+    $files = Get-ChildItem -LiteralPath $folder -Recurse -File -ErrorAction SilentlyContinue | ? { $Global:ValidExtensions -contains $_.Extension.ToLower() }
     foreach ($f in $files) {
         if ($excl -and ($f.Name -match $excl)) { continue }
         if ($skipDays -gt 0 -and $f.LastWriteTime -gt $cut) { continue }
@@ -115,7 +169,7 @@ foreach ($k in @($Queues.Keys)) {
 Write-Host "Starting Batch ($TotalFiles files)..." -ForegroundColor Green
 
 while ($true) {
-    if (Test-Path $LockFile) { Write-Host "Paused."; break }
+    if (Test-Path -LiteralPath $LockFile) { Write-Host "Paused."; break }
     Wait-For-RunWindow
 
     $active = @($Queues.Keys | ? { $Queues[$_].Count -gt 0 -and $SkippedDrives -notcontains $_ })
