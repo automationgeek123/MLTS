@@ -297,26 +297,28 @@ Key fields:
 
 This file is safe to open while the script is running.
 
----
+Report scripts write:
 
-## Failure Popups
-
-Popups appear **only for fatal conditions**, configured by:
-
-```powershell
-Batch.PopupFatalStatusRegex
-```
-
-Defaults include:
-
-* Worker crashes
-* Encode failures
-* DV preservation failures
-* Low-space stops
-
-Non-fatal skips do **not** popup.
+* `scan_missing_audio.ps1` → `missing_audio_report.csv`
+* `scan_wrong_language.ps1` → `wrong_language_report.csv`
+* `estimate_savings.ps1` → `savings_report.csv` (when `-ReportFile` is not supplied)
 
 ---
+
+## Popups
+
+The suite uses a small number of interactive popups:
+
+* **Run Window (batch controller)**: shown when the current time is outside `Batch.RunWindowStart`–`Batch.RunWindowEnd`.
+  * **YES** → run now
+  * **NO** → wait; the script sleeps and starts automatically when the window opens
+
+* **Low Disk Space (batch controller and worker)**: shown when free space on the output/work drive is below `Batch.MinFreeSpaceGB`.
+  * **YES** → skip that drive for the rest of the current run
+  * **NO** → stop immediately
+
+No other status-based popup filtering is used.
+
 
 ## Safety Guarantees
 
