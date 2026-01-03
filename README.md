@@ -53,7 +53,7 @@ The script will detect that `media_user_settings.json` is missing and launch a *
 1. **Target Folders:** Where your media lives (e.g., `G:\English TV`).
 2. **Tool Paths:** Location of `HandBrakeCLI.exe` and `ffprobe.exe`.
 3. **Temp Path:** Dedicated SSD for transcoding (optional).
-4. **Resource Mode:** Process priority (`Light`, `Medium`, `Heavy`).
+4. **Resource Mode:** Process priority (`Light`, `Medium`, `High`).
 
 ### 2. Routine Execution
 
