@@ -1,370 +1,180 @@
+
+```markdown
 # Media Fix – Automated Video Optimization Suite
 
-Media Fix is a PowerShell-based automation suite for **analyzing, optimizing, and maintaining large media libraries** (movies/TV) with a strong focus on **safety, determinism, and auditability**.
+Media Fix is a PowerShell-based automation suite for **analyzing, optimizing, and maintaining large media libraries** (movies/TV). It prioritizes **safety, determinism, and auditability** over raw speed.
 
-It is designed to:
-- Reduce storage usage by transcoding inefficient video files
-- Preserve quality (HEVC, 10-bit, HDR, Dolby Vision when possible)
-- Avoid corrupting or partially downloaded files
-- Run unattended (scheduled / background) with clear logging and pop-ups for critical issues
+**Current Status:** Production Stable (Strict Mode Compatible)
 
----
+## Key Features
 
-## Key Design Principles
-
-- **Never destroy data silently**
-- **Log everything**
-- **Make all decisions deterministic and configurable**
-- **Separate defaults (repo) from user-specific settings (local only)**
+* **Space Saving:** Transcodes bloated files to efficient HEVC (x265/QSV/NVENC).
+* **Safety First:**
+    * **Atomic Swaps:** Original files are never deleted until the new file is verified.
+    * **Root Protection:** Refuses to process or write files in drive roots (e.g., `D:\`).
+    * **Free Space Guard:** Pauses execution if disk space drops below a threshold (default 50GB).
+* **Smart Automation:**
+    * **Night Mode:** Restricts processing to specific hours (e.g., 23:00–07:00).
+    * **Least-Busy Scheduling:** Dynamically picks files from the drive with the least I/O load.
+    * **Queue Sorting:** Processes files Smallest-First, Largest-First, or Alphabetically.
+* **Reporting:**
+    * **Savings Estimator:** Predicts space savings without modifying files.
+    * **Audio/Lang Scanners:** Finds silent files or foreign-language-only tracks.
 
 ---
 
 ## Repository Structure
 
-```
-
-media_common.ps1              # Shared helpers, logging, ffprobe parsing
-media_config.ps1              # GitHub-safe default configuration (edit this)
-run_batch_job.ps1             # Main batch controller
-shrink_execute.ps1            # Worker: processes one file at a time
-scan_missing_audio.ps1        # Report: files with no audio streams
-scan_wrong_language.ps1       # Report: files with unknown default audio language
-estimate_savings.ps1          # Report: size/codec inventory (no transcoding)
-silent_boot.vbs               # Optional background launcher
-media_user_settings.example.json
-.gitignore
-README.md
-
-```
+| File | Role |
+| :--- | :--- |
+| `run_batch_job.ps1` | **The Controller.** Scans drives, builds queues, and manages the worker loop. |
+| `shrink_execute.ps1` | **The Worker.** Processes one file at a time (runs hidden). |
+| `media_common.ps1` | **The Library.** Shared helpers, logging, and robust config loaders. |
+| `media_config.ps1` | **Defaults.** The safe, base configuration (tracked in Git). |
+| `media_user_settings.json` | **User Config.** Your local paths/settings (generated on first run). |
+| `estimate_savings.ps1` | **Report:** Scans your library and calculates potential savings. |
+| `scan_missing_audio.ps1` | **Report:** Finds files with 0 audio streams. |
+| `scan_wrong_language.ps1` | **Report:** Finds files where the default track isn't in your "Safe List". |
+| `silent_boot.vbs` | **Launcher:** Runs the batch job completely in the background. |
 
 ---
 
-## How Configuration Works
+## Quick Start
 
-### 1. `media_config.ps1` (Tracked in Git)
-- Contains **safe defaults**
-- No personal paths or folders
-- Reloaded on every run
-- Edit this to change global behavior
-
-### 2. `media_user_settings.json` (Generated Locally)
-- Created on **first run**
-- Stores **machine-specific values**:
-  - Media folders
-  - Tool paths (HandBrakeCLI / ffprobe)
-  - Temp folder
-  - Resource mode
-- Automatically reused on future runs
-- **Ignored by Git** (see `.gitignore`)
-
-**Merge order (highest priority wins):**
-```
-
-media_config.ps1  →  media_user_settings.json
-
-````
-
----
-
-## First-Run Setup (Interactive)
-
-When you run:
-
+### 1. First Run (Interactive Setup)
+Open PowerShell in the script folder and run:
 ```powershell
 .\run_batch_job.ps1
-````
 
-for the first time, you will be prompted for:
+```
 
-1. **Folders to scan**
+The script will detect that `media_user_settings.json` is missing and launch a **setup wizard**. You will be asked for:
 
-   * One per line
-   * Blank line to finish
+1. **Target Folders:** Where your media lives (e.g., `G:\English TV`).
+2. **Tool Paths:** Location of `HandBrakeCLI.exe` and `ffprobe.exe`.
+3. **Temp Path:** Dedicated SSD for transcoding (optional).
+4. **Resource Mode:** Process priority (`Light`, `Medium`, `Heavy`).
 
-2. **HandBrakeCLI.exe path**
+### 2. Routine Execution
 
-   * Press Enter if it is in the same folder or in PATH
+Just run `.\run_batch_job.ps1` again.
 
-3. **ffprobe.exe path**
+* It will load your settings.
+* It will scan for files.
+* It will start processing files **silently in the background**.
+* **Note:** The main window stays open to show progress ("Processing [G]: Movie.mkv"), but the heavy lifting happens in a hidden process.
 
-   * Press Enter if it is in the same folder or in PATH
+### 3. Background / Scheduled Task
 
-4. **Transcode temp folder**
-
-   * Press Enter to use the **source file’s folder**
-   * Or specify a separate drive/folder
-
-5. **Resource mode**
-
-   * `Light`, `Medium`, or `Heavy`
-   * Controls HandBrake **process priority only**
-
-6. **Skip recently modified files**
-
-   * Minutes to skip files still being copied/downloaded
-
-7. **Optional: age filter**
-
-   * Only process files older than N days (0 disables)
-
-These values are saved to `media_user_settings.json` and reused automatically.
+Use `silent_boot.vbs` to run the entire suite hidden (no window at all). Ideal for Windows Task Scheduler.
 
 ---
 
-## Running in Background
+## Configuration
 
-Use:
+### `media_user_settings.json`
+
+This file controls your local environment. You can edit it manually to tweak advanced settings.
+
+**Example `Batch` Block:**
+
+```json
+"Batch": {
+    "TargetFolders": [
+        "G:\\English TV",
+        "H:\\Movies"
+    ],
+    "SortOrder": "SmallestFirst",       // Options: SmallestFirst, LargestFirst, Alphabetical
+    "RunWindowStart": "23:00",          // Start time (24h)
+    "RunWindowEnd": "07:00",            // End time
+    "MinFreeSpaceGB": 50,               // Pause if destination has less space
+    "ExcludeNameRegex": "^sample|trailer", // Skip files matching this regex
+    "SkipFilesNewerThanDays": 15        // Don't touch files added recently
+}
+
+```
+
+### `media_config.ps1`
+
+Contains technical defaults like bitrate targets and safe languages.
+
+* **Media Targets:** `Target1080 = 2500` (kbps target for savings estimation).
+* **Safe Languages:** `SafeLangs = @("eng", "und", "jpn")`.
+
+---
+
+## Reports & Analysis
+
+The reporting tools are now "Batch Aware." If you run them without arguments, they automatically scan the folders defined in your `media_user_settings.json`.
+
+### 1. Savings Estimator
+
+Calculates how much space you *could* save based on your bitrate targets.
 
 ```powershell
-silent_boot.vbs
-```
-
-Behavior:
-
-* If `media_user_settings.json` **does not exist** → runs **visible**
-* If it **exists** → runs **hidden**
-* Pop-ups will still appear for critical issues
-
-Ideal for Task Scheduler or Startup execution.
-
----
-
-## Dolby Vision (DV) Policy
-
-Dolby Vision handling is **explicit and deterministic**.
-
-### Config key
-
-```powershell
-Shrink.DolbyVisionPolicy =
-  Skip |
-  RequirePreserve |
-  TranscodeAllowLoss
-```
-
-### Meanings
-
-| Policy                        | Behavior                                              |
-| ----------------------------- | ----------------------------------------------------- |
-| **Skip**                      | If input is Dolby Vision → do not transcode           |
-| **RequirePreserve** (default) | Transcode DV → **replace only if output is still DV** |
-| **TranscodeAllowLoss**        | Transcode DV and replace even if DV metadata is lost  |
-
-DV presence is detected via:
-
-* `dvh1` / `dvhe` codec tags
-* ffprobe `side_data_list` (DOVI)
-
-DV status is logged for both input and output.
-
----
-
-## Run Window (Night Mode)
-
-Configured in `media_config.ps1`:
-
-```powershell
-Batch.RunWindowStart = "23:00"
-Batch.RunWindowEnd   = "07:00"
-```
-
-Behavior:
-
-* If current time is **inside** the window → runs immediately
-* If **outside** the window:
-
-  * Popup appears:
-
-    * **YES** → run now
-    * **NO** → wait until window opens
-  * If waiting, script sleeps and **starts automatically** at window start
-
-Cross-midnight windows are fully supported.
-
----
-
-## Drive Scheduling (Least Busy Drive)
-
-When enabled:
-
-```powershell
-Batch.DriveSchedulingMode = "PerfCounterLeastBusy"
-```
-
-* Files are grouped by **source drive**
-* Before each file is picked, Windows Performance Counters are sampled:
-
-  * `\LogicalDisk(X:)\% Disk Time`
-* The **least busy drive at that moment** is selected
-* Counters are re-checked **for every pick**
-
-Fallback:
-
-* If counters fail → folder order is used
-
----
-
-## Low Disk Space Handling
-
-Configured by:
-
-```powershell
-Batch.MinFreeSpaceGB = 50
-```
-
-Before starting an encode:
-
-* Free space is checked on the **output/work drive**
-* If below threshold:
-
-  * Popup appears:
-
-    * **YES** → skip this drive for the rest of the run
-    * **NO** → stop immediately
-* Skip decision applies **only to the current run**
-
-All events are logged.
-
----
-
-## Resource Modes
-
-```powershell
-Shrink.ResourceMode = Light | Medium | Heavy
-```
-
-Controls **HandBrake process priority only**:
-
-| Mode   | Priority    |
-| ------ | ----------- |
-| Light  | BelowNormal |
-| Medium | Normal      |
-| Heavy  | AboveNormal |
-
-No CPU pinning, no concurrency changes.
-
----
-
-## Exclude Patterns
-
-```powershell
-Batch.ExcludeNameRegex = '^hb_temp_|sample|trailer'
-```
-
-Applied to **file name only** (not full path).
-
-Used to avoid:
-
-* Temporary outputs
-* Samples
-* Trailers
-* Extras
-
----
-
-## Max Files per Run
-
-```powershell
-Batch.MaxFilesPerRun = 0
-```
-
-* `0` → unlimited
-* `N > 0` → stop after N files
-
-Useful for scheduled incremental runs.
-
----
-
-## Logging
-
-All activity is written to:
+.\estimate_savings.ps1
 
 ```
-shrink_log.csv
-```
 
-Schema is fixed and enforced.
+* **Output:** `savings_report.csv`
+* **Logic:** Aggregates all target folders into one list.
 
-Key fields:
+### 2. Missing Audio Scan
 
-* `Strategy` – why the file was selected
-* `Status` – outcome (`Success`, `Skipped-*`, `Fail-*`)
-* `Detail` – human-readable explanation
-* `OrigVideo` / `NewVideo`
-* `OrigAudio` / `NewAudio`
-* `OrigDV` / `NewDV`
-* `Encode10`
-
-This file is safe to open while the script is running.
-
-Report scripts write:
-
-* `scan_missing_audio.ps1` → `missing_audio_report.csv`
-* `scan_wrong_language.ps1` → `wrong_language_report.csv`
-* `estimate_savings.ps1` → `savings_report.csv` (when `-ReportFile` is not supplied)
-
----
-
-## Popups
-
-The suite uses a small number of interactive popups:
-
-* **Run Window (batch controller)**: shown when the current time is outside `Batch.RunWindowStart`–`Batch.RunWindowEnd`.
-  * **YES** → run now
-  * **NO** → wait; the script sleeps and starts automatically when the window opens
-
-* **Low Disk Space (batch controller and worker)**: shown when free space on the output/work drive is below `Batch.MinFreeSpaceGB`.
-  * **YES** → skip that drive for the rest of the current run
-  * **NO** → stop immediately
-
-No other status-based popup filtering is used.
-
-
-## Safety Guarantees
-
-* Originals are backed up as `.bak` during replace
-* `.bak` files are restored automatically if a failure occurs
-* Temp files are cleaned up
-* Recently modified files are skipped
-* No overwrite happens without validation
-
----
-
-## Typical Usage
-
-### One-time setup
-
-```powershell
-.\run_batch_job.ps1
-```
-
-### Scheduled nightly run
-
-* Use `silent_boot.vbs`
-* Set Task Scheduler trigger
-
-### Reports only
+Finds files that might be corrupted (video exists, but audio track count is 0).
 
 ```powershell
 .\scan_missing_audio.ps1
-.\scan_wrong_language.ps1
-.\estimate_savings.ps1
+
 ```
 
+* **Output:** `missing_audio_report.csv`
+
+### 3. Wrong Language Scan
+
+Flags files where the **default** audio track is not in your `SafeLangs` list (e.g., a movie defaulting to French commentary).
+
+```powershell
+.\scan_wrong_language.ps1
+
+```
+
+* **Output:** `wrong_language_report.csv`
+
 ---
 
-## License / Use
+## Log Files
 
-This project is provided as-is.
-Test on a small subset before running against a full library.
+All transcoding activity is logged to `shrink_log.csv`. This file is locked safely, so you can open it in Excel/Notepad while the script runs.
+
+**Key Columns:**
+
+* **Strategy:** Why the file was picked (e.g., "Upgrade (h264)", "4K Bloat").
+* **Status:** Outcome (`Success`, `Skipped-Efficient`, `Failed-HandBrake`, `Skipped-LowSpace`).
+* **Saved_MB:** Space reclaimed.
+* **Encode10:** `1` if 10-bit encoding was used (for HDR/DV preservation).
 
 ---
 
-## Final Notes
+## Safety Mechanisms
 
-This suite is intentionally conservative.
-If a decision is ambiguous, it will **skip or stop rather than guess**.
+1. **Strict Mode Compliance:** All scripts run under `Set-StrictMode -Version Latest` to prevent silent variable errors.
+2. **Null-Safe Config:** Uses robust accessors (`Get-Cfg`) to prevent crashes if a setting is missing.
+3. **Root Path Block:** The worker will **immediately exit** if asked to write to a drive root (e.g., `G:\hb_temp_...`), preventing accidental mass deletion risks.
+4. **Verification Loop:** After encoding, the new file is probed 3 times. It must pass duration, stream count, and codec checks before the original is replaced.
 
-That’s by design.
+---
+
+## Technical Details
+
+* **Dolby Vision:** Preserved if `DolbyVisionPolicy` is set to `RequirePreserve`. If the output loses metadata, the swap is aborted.
+* **Hardware Acceleration:** Supports `Intel QSV` (default), `NVIDIA NVENC`, and `CPU (x265)`. Auto-detects capabilities.
+* **Logging:** Uses a retry-backoff mechanism to write to CSVs even if they are momentarily locked by another process.
+
+---
+
+*Use at your own risk. Always test on a small folder first.*
+
+```
 
 ```

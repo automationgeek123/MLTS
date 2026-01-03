@@ -1,198 +1,153 @@
-# --- run_batch_job.ps1 (V48) ---
+﻿# --- run_batch_job.ps1 (V69 - Final Production) ---
 # Controller:
-# - Cleans stale hb_temp files
-# - Restores .bak ONLY when original is missing
-# - Builds per-drive queues
-# - Runs shrink_execute.ps1 one file at a time on the most idle drive
-# - Writes controller events into the SAME shrink_log.csv schema
+# - Production Mode: Runs workers HIDDEN (no popup windows).
+# - Safe Config Access: Uses Get-Cfg to prevents Strict Mode crashes.
+# - Logs "Picked" status before execution.
 
 Set-StrictMode -Version Latest
-Add-Type -AssemblyName System.Windows.Forms
 
 $ScriptDir = $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($ScriptDir)) { $ScriptDir = "." }
 
-. (Join-Path $ScriptDir "media_common.ps1")
+# --- 1) BOOTSTRAP & FIRST RUN ---
+$CommonFile   = Join-Path $ScriptDir "media_common.ps1"
+$SettingsFile = Join-Path $ScriptDir "media_user_settings.json"
+
+if (-not (Test-Path -LiteralPath $SettingsFile)) {
+    # (Simplified setup logic maintained for safety)
+    $folders = @(); while ($true) { $f = Read-Host "Path to scan"; if (-not $f) { break }; $folders += $f }
+    $def = [ordered]@{ 
+        Tools=@{HandBrakeCli="HandBrakeCLI.exe";Ffprobe="ffprobe.exe"}; 
+        Shrink=@{ResourceMode="Light";TempPath="";DolbyVisionPolicy="RequirePreserve"}; 
+        Batch=@{TargetFolders=$folders;MinFreeSpaceGB=50;SkipFilesNewerThanDays=15;SortOrder="SmallestFirst";RunWindowStart="23:00";RunWindowEnd="07:00"} 
+    }
+    $def | ConvertTo-Json -Depth 3 | Set-Content $SettingsFile
+}
+
+. $CommonFile
 Test-MediaTools
 
 $Executor = Join-Path $ScriptDir "shrink_execute.ps1"
+if (-not (Test-Path $Executor)) { throw "Worker script missing: $Executor" }
 $LockFile = Join-Path $ScriptDir "PAUSE.lock"
-$LogPath  = Join-Path $ScriptDir "shrink_log.csv"
+$Global:BatchOverrideWindow = $false
 
-if (Test-Path -LiteralPath $LockFile) { exit }
-if (-not (Test-Path -LiteralPath $Executor)) { throw "Missing shrink_execute.ps1 in: $ScriptDir" }
+# --- 2) HELPERS ---
+function Get-Cfg { 
+    param($Key1, $Key2) 
+    if ($Global:MediaConfig.Contains($Key1)) {
+        $k1 = $Global:MediaConfig[$Key1]
+        if ($k1 -is [System.Collections.IDictionary] -and $k1.Contains($Key2)) { return $k1[$Key2] }
+    }
+    return $null
+}
 
-# Update these folders for your system
-$TargetFolders = @(
-    "E:\Hindi Movies",
-    "G:\English TV",
-    "G:\Hindi TV",
-    "H:\English Movies"
-)
+function Wait-For-RunWindow {
+    if ($Global:BatchOverrideWindow) { return }
+    $startStr = Get-Cfg "Batch" "RunWindowStart"; $endStr = Get-Cfg "Batch" "RunWindowEnd"
+    if (-not $startStr -or -not $endStr -or ($startStr -eq "00:00" -and $endStr -eq "24:00")) { return }
 
-$LogCols = $Global:ShrinkLogColumns
+    do {
+        $now = Get-Date
+        try {
+            $s = $startStr.Split(':'); $e = $endStr.Split(':')
+            $tS = Get-Date -Hour $s[0] -Minute $s[1] -Second 0; $tE = Get-Date -Hour $e[0] -Minute $e[1] -Second 0
+        } catch { return }
 
-function Write-BatchLog {
-    param(
-        [string]$InputPath,
-        [string]$OutputPath = "-",
-        [string]$Strategy = "None",
-        [double]$Old_MB = 0,
-        [double]$New_MB = 0,
-        [double]$Saved_MB = 0,
-        [string]$Status,
-        [string]$Detail = "",
-        [string]$OrigVideo = "",
-        [string]$NewVideo  = "",
-        [string]$OrigAudio = "",
-        [string]$NewAudio  = "",
-        [int]$OrigDV = 0,
-        [int]$NewDV  = 0,
-        [int]$Encode10 = 0,
-        [string]$AudioPlan = ""
-    )
-    [pscustomobject]@{
-        Date      = (Get-Date).ToString('yyyy-MM-dd HH:mm')
-        InputPath = $InputPath
-        OutputPath= $OutputPath
-        Strategy  = $Strategy
-        Old_MB    = $Old_MB
-        New_MB    = $New_MB
-        Saved_MB  = $Saved_MB
-        Status    = $Status
-        Detail    = $Detail
-        OrigVideo = $OrigVideo
-        NewVideo  = $NewVideo
-        OrigAudio = $OrigAudio
-        NewAudio  = $NewAudio
-        OrigDV    = $OrigDV
-        NewDV     = $NewDV
-        Encode10  = $Encode10
-        AudioPlan = $AudioPlan
-    } | Select-Object $LogCols | Export-Csv -Path $LogPath -Append -NoTypeInformation -Encoding UTF8
+        $inWindow = if ($tS -le $tE) { ($now -ge $tS -and $now -le $tE) } else { ($now -ge $tS -or $now -le $tE) }
+
+        if (-not $inWindow) {
+            $ans = Show-Popup -Text "Current time ($($now.ToString('HH:mm'))) is outside run window.`n`nRun anyway?" -Title "Night Mode" -Buttons "YesNo" -TimeoutSeconds 30
+            if ($ans -eq 6) { $Global:BatchOverrideWindow = $true; return }
+            
+            $wake = $tS; if ($now -gt $tS) { $wake = $tS.AddDays(1) }
+            Write-Host "Sleeping until $($wake.ToString('yyyy-MM-dd HH:mm'))" -ForegroundColor Yellow
+            Start-Sleep -Seconds ($wake - $now).TotalSeconds
+        }
+    } while (-not $inWindow)
 }
 
 function Get-DriveIdleStats {
-    param([string[]]$DrivesToCheck)
-    $stats = @{}
-    foreach ($d in $DrivesToCheck) {
-        try {
-            $ctr = Get-Counter -Counter "\LogicalDisk($d)\% Idle Time" -MaxSamples 2 -ErrorAction Stop
-            $avg = ($ctr.CounterSamples.CookedValue | Measure-Object -Average).Average
-            $stats[$d] = [double]$avg
-        }
-        catch { $stats[$d] = 50.0 }
-    }
-    return $stats
+    param($Drives)
+    $stats = @{}; foreach ($d in $Drives) { try { $stats[$d] = ([double](Get-Counter "\LogicalDisk($d)\% Idle Time" -Max 1).CounterSamples.CookedValue) } catch { $stats[$d] = 50 } }; return $stats
 }
 
-function Invoke-Cleanup {
-    foreach ($folder in $TargetFolders) {
-        if (-not (Test-Path -LiteralPath $folder)) { continue }
+# --- 3) BUILD QUEUE ---
+Invoke-Cleanup
+$TargetFolders = @(Get-Cfg "Batch" "TargetFolders")
+if ($TargetFolders.Count -eq 0) { Write-Warning "No targets."; exit }
 
-        # 1) Cleanup stale temp outputs
-        $cutoff = (Get-Date).AddHours(-24)
-        Get-ChildItem -LiteralPath $folder -Recurse -Filter "hb_temp_*.mkv" -ErrorAction SilentlyContinue |
-            Where-Object { $_.LastWriteTime -lt $cutoff } |
-            Remove-Item -Force -ErrorAction SilentlyContinue
+$Queues = @{}
+$SkippedDrives = @()
+$TotalFiles = 0
+$excl = Get-Cfg "Batch" "ExcludeNameRegex"; $skipDays = [int](Get-Cfg "Batch" "SkipFilesNewerThanDays"); $cut = (Get-Date).AddDays(-$skipDays)
 
-        # 2) Safe .bak recovery
-        $baks = Get-ChildItem -LiteralPath $folder -Recurse -Filter "*.bak" -ErrorAction SilentlyContinue
-        foreach ($bak in $baks) {
-            $originalPath = $bak.FullName.Substring(0, $bak.FullName.Length - 4)
-
-            if (-not (Test-Path -LiteralPath $originalPath)) {
-                try {
-                    Move-Item -LiteralPath $bak.FullName -Destination $originalPath -Force
-                    Write-BatchLog -InputPath $bak.FullName -OutputPath $originalPath -Strategy "Recovery" -Old_MB ([math]::Round($bak.Length/1MB,2)) -Status "Recovery-RestoredMissingOriginal"
-                }
-                catch {
-                    Write-BatchLog -InputPath $bak.FullName -OutputPath $originalPath -Strategy "Recovery" -Old_MB ([math]::Round($bak.Length/1MB,2)) -Status "Recovery-RestoreFailed" -Detail $_.Exception.Message
-                }
-            }
-            else {
-                # Original exists; do not overwrite. Flag for manual check only if probe fails.
-                $probe = Invoke-FfprobeJson $originalPath @("-show_format")
-                if (-not $probe -or -not $probe.format) {
-                    Write-BatchLog -InputPath $originalPath -OutputPath $bak.FullName -Strategy "Recovery" -Status "Warning-OriginalProbeFailed-BakExists" -Detail "ffprobe exit=$($Global:LastFfprobeExitCode)"
-                }
-            }
-        }
+Write-Host "Scanning..." -ForegroundColor Cyan
+foreach ($folder in $TargetFolders) {
+    if (-not (Test-Path $folder)) { continue }
+    $files = Get-ChildItem $folder -Recurse -File -ErrorAction SilentlyContinue | ? { $Global:ValidExtensions -contains $_.Extension.ToLower() }
+    foreach ($f in $files) {
+        if ($excl -and ($f.Name -match $excl)) { continue }
+        if ($skipDays -gt 0 -and $f.LastWriteTime -gt $cut) { continue }
+        $d = (Split-Path -Qualifier $f.FullName); if(-not $d){$d="UNC"}
+        if(-not $Queues[$d]){$Queues[$d] = New-Object System.Collections.Generic.List[object]}
+        $Queues[$d].Add($f)
+        $TotalFiles++
     }
 }
 
-try {
+# Sort
+$sortMode = Get-Cfg "Batch" "SortOrder"
+if (-not $sortMode) { $sortMode = "SmallestFirst" }
+Write-Host "Sorting ($sortMode)..." -ForegroundColor Magenta
+foreach ($k in @($Queues.Keys)) {
+    $l = $Queues[$k]; $sl = @()
+    switch ($sortMode) {
+        "SmallestFirst" { $sl = @($l | Sort Length) }
+        "LargestFirst"  { $sl = @($l | Sort Length -Desc) }
+        "Alphabetical"  { $sl = @($l | Sort Name) }
+        Default         { $sl = @($l) }
+    }
+    $nl = New-Object System.Collections.Generic.List[object]; foreach($i in $sl){$nl.Add($i)}; $Queues[$k] = $nl
+}
+
+# --- 4) EXECUTE ---
+Write-Host "Starting Batch ($TotalFiles files)..." -ForegroundColor Green
+
+while ($true) {
+    if (Test-Path $LockFile) { Write-Host "Paused."; break }
+    Wait-For-RunWindow
+
+    $active = @($Queues.Keys | ? { $Queues[$_].Count -gt 0 -and $SkippedDrives -notcontains $_ })
+    if ($active.Count -eq 0) { break }
+
+    $stats = Get-DriveIdleStats $active
+    $drive = ($stats.GetEnumerator() | Sort Value -Desc | Select -First 1).Key
+    
+    $file = $Queues[$drive][0]; $Queues[$drive].RemoveAt(0)
+
+    # Late-bound check
+    $skipMins = [int](Get-Cfg "Shrink" "RecentlyModifiedSkipMinutes")
+    if ($skipMins -gt 0) {
+        if (((Get-Date)-$file.LastWriteTime).TotalMinutes -lt $skipMins) {
+            Write-Host "Skipping (Active): $($file.Name)" -ForegroundColor DarkGray; continue
+        }
+    }
+
+    # Log Pick
+    Write-Host "Processing [$drive]: $($file.Name)" -ForegroundColor Green
+    Write-MediaLog -InputPath $file.FullName -Status "Picked" -Strategy "Batch" -Detail "Drive=$drive"
+
+    # Execute Hidden
+    $escExe = $Executor.Replace("'","''"); $escPath = $file.FullName.Replace("'","''")
+    $cmd = "& '$escExe' -ScanPath '$escPath' -NoPause"
+    
+    $p = Start-Process "powershell" -Arg "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $cmd -WindowStyle Hidden -Wait -PassThru
+    
+    if ($p.ExitCode -eq 10) {
+        $ans = Show-Popup -Text "Low Disk Space on $drive. Skip drive?" -Title "Space Warning" -Buttons "YesNo"
+        if ($ans -eq 6) { $SkippedDrives += $drive } else { exit }
+    }
     Invoke-Cleanup
-
-    # 3) Build per-drive queues
-    $queues = @{} # drive -> List[object]
-    $cutoffDate = (Get-Date).AddDays(-30)
-
-    foreach ($folder in $TargetFolders) {
-        if (-not (Test-Path -LiteralPath $folder)) { continue }
-
-        $files = Get-ChildItem -LiteralPath $folder -Recurse -File -ErrorAction SilentlyContinue |
-                 Where-Object { $Global:ValidExtensions -contains $_.Extension.ToLower() }
-
-        foreach ($f in $files) {
-            if ($f.LastWriteTime -ge $cutoffDate) {
-                Write-BatchLog -InputPath $f.FullName -Strategy "Queue" -Old_MB ([math]::Round($f.Length/1MB,2)) -Status "Skipped-TooNew" -Detail "LastWrite=$($f.LastWriteTime.ToString('yyyy-MM-dd'))"
-                continue
-            }
-
-            $drive = (Split-Path -Qualifier $f.FullName)
-            if ([string]::IsNullOrWhiteSpace($drive)) { $drive = "UNC" }
-
-            if (-not $queues.ContainsKey($drive)) {
-                $queues[$drive] = New-Object 'System.Collections.Generic.List[object]'
-            }
-
-            $queues[$drive].Add([pscustomobject]@{ FullPath = $f.FullName; Size = $f.Length })
-        }
-    }
-
-    # Sort each drive queue (largest first)
-    foreach ($k in @($queues.Keys)) {
-        $sorted = $queues[$k] | Sort-Object Size -Descending
-        $list = New-Object 'System.Collections.Generic.List[object]'
-        foreach ($item in $sorted) { $list.Add($item) }
-        $queues[$k] = $list
-    }
-
-    # 4) Traffic controller loop
-    while ($true) {
-        if (Test-Path -LiteralPath $LockFile) { break }
-
-        $activeDrives = @($queues.Keys | Where-Object { $queues[$_].Count -gt 0 -and $_ -ne "UNC" })
-        if (-not $activeDrives -or $activeDrives.Count -eq 0) { break }
-
-        $driveStats = Get-DriveIdleStats -DrivesToCheck $activeDrives
-        $sortedDrives = $driveStats.GetEnumerator() | Sort-Object Value -Descending
-
-        $driveToProcess = $null
-        foreach ($d in $sortedDrives) {
-            if ($queues.ContainsKey($d.Key) -and $queues[$d.Key].Count -gt 0) { $driveToProcess = $d.Key; break }
-        }
-        if (-not $driveToProcess) { break }
-
-        $next = $queues[$driveToProcess][0]
-        $queues[$driveToProcess].RemoveAt(0)
-
-        $procArgs = @(
-            "-NoProfile",
-            "-NonInteractive",
-            "-NoLogo",
-            "-ExecutionPolicy", "Bypass",
-            "-File", "`"$Executor`"",
-            "-ScanPath", "`"$($next.FullPath)`"",
-            "-LogFile", "`"$LogPath`"",
-            "-NoPause",
-            "-NormalPriority"
-        )
-
-        Start-Process -FilePath "powershell.exe" -ArgumentList $procArgs -WindowStyle Hidden -Wait
-    }
 }
-catch {
-    [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Media Fix Error", 0, 16)
-}
+Write-Host "Done." -ForegroundColor Green
