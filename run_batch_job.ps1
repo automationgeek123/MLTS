@@ -1,9 +1,8 @@
-﻿# --- run_batch_job.ps1 (V76 - Safe Arguments) ---
+﻿# --- run_batch_job.ps1 (V78 - Quoting Fix) ---
 # Controller:
-# - FIX: Uses safe ArgumentList array for worker startup (Fixes quoting issues).
+# - FIX: Explicitly quotes paths in ArgumentList to survive PowerShell 5.1 parsing.
 # - Setup Wizard: Full interactive setup (Tools, Temp, Priority, Filters).
 # - Production Mode: Runs workers HIDDEN (no popup windows).
-# - Safe Config Access: Uses Get-Cfg to prevent Strict Mode crashes.
 
 Set-StrictMode -Version Latest
 
@@ -192,12 +191,13 @@ while ($true) {
     Write-Host "Processing [$drive]: $($file.Name)" -ForegroundColor Green
     Write-MediaLog -InputPath $file.FullName -Status "Picked" -Strategy "Batch" -Detail "Drive=$drive"
 
-    # --- SAFE EXECUTION (Argument List) ---
+    # --- SAFE EXECUTION (Argument List + Quotes) ---
+    # FIX: Explicitly quote paths to survive PS 5.1 argument parsing bugs
     $psArgs = @(
         "-NoProfile", 
         "-ExecutionPolicy", "Bypass", 
-        "-File", $Executor,
-        "-ScanPath", $file.FullName,
+        "-File", "`"$Executor`"",
+        "-ScanPath", "`"$($file.FullName)`"",
         "-NoPause"
     )
     
