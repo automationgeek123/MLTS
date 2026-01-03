@@ -1,9 +1,9 @@
-﻿# --- run_batch_job.ps1 (V70 - Full Wizard + Production) ---
+﻿# --- run_batch_job.ps1 (V76 - Safe Arguments) ---
 # Controller:
-# - Setup Wizard: Restored full interactive setup (Tools, Temp, Priority, Filters).
+# - FIX: Uses safe ArgumentList array for worker startup (Fixes quoting issues).
+# - Setup Wizard: Full interactive setup (Tools, Temp, Priority, Filters).
 # - Production Mode: Runs workers HIDDEN (no popup windows).
 # - Safe Config Access: Uses Get-Cfg to prevent Strict Mode crashes.
-# - Logs "Picked" status before execution.
 
 Set-StrictMode -Version Latest
 
@@ -192,11 +192,16 @@ while ($true) {
     Write-Host "Processing [$drive]: $($file.Name)" -ForegroundColor Green
     Write-MediaLog -InputPath $file.FullName -Status "Picked" -Strategy "Batch" -Detail "Drive=$drive"
 
-    # Execute Hidden
-    $escExe = $Executor.Replace("'","''"); $escPath = $file.FullName.Replace("'","''")
-    $cmd = "& '$escExe' -ScanPath '$escPath' -NoPause"
+    # --- SAFE EXECUTION (Argument List) ---
+    $psArgs = @(
+        "-NoProfile", 
+        "-ExecutionPolicy", "Bypass", 
+        "-File", $Executor,
+        "-ScanPath", $file.FullName,
+        "-NoPause"
+    )
     
-    $p = Start-Process "powershell" -Arg "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $cmd -WindowStyle Hidden -Wait -PassThru
+    $p = Start-Process -FilePath "powershell.exe" -ArgumentList $psArgs -WindowStyle Hidden -Wait -PassThru
     
     if ($p.ExitCode -eq 10) {
         $ans = Show-Popup -Text "Low Disk Space on $drive. Skip drive?" -Title "Space Warning" -Buttons "YesNo"

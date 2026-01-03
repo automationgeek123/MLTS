@@ -1,7 +1,8 @@
-# --- media_common.ps1 (V74 - Bracket Safety) ---
+# --- media_common.ps1 (V77 - Silent Failure Fixes) ---
 # Shared configuration + robust helpers.
-# FIX: Added -LiteralPath to Resolve-ScanPath to support filenames with brackets [].
-# FIX: Replaces ALL dot-notation config access with Index Notation ['Key'].
+# FIX: Centralized Get-Cfg with defensive null checks.
+# FIX: Added logging to empty catch blocks (no more silent failures).
+# FIX: Corrected Get-ChildItem syntax in cleanup logic.
 
 Set-StrictMode -Version Latest
 
@@ -37,21 +38,41 @@ if (Test-Path -LiteralPath $UserFile) {
     } catch { Write-Warning "Failed to load settings: $_" }
 }
 
-$Global:HbPath = $Global:MediaConfig['Tools']['HandBrakeCli']
+# --- 2) ROBUST CONFIG HELPER (NEW) ---
+function Get-Cfg { 
+    param($Key1, $Key2)
+    # Defensive Check: Return null if config isn't loaded yet
+    if ($null -eq $Global:MediaConfig) { return $null }
+    
+    if ($Global:MediaConfig.Contains($Key1)) {
+        $k1 = $Global:MediaConfig[$Key1]
+        if ($k1 -is [System.Collections.IDictionary] -and $k1.Contains($Key2)) { 
+            return $k1[$Key2] 
+        }
+    }
+    return $null
+}
+
+# Strict Access using helper where possible, or direct index for known keys
+$Global:HbPath = Get-Cfg "Tools" "HandBrakeCli"
+if (-not $Global:HbPath) { $Global:HbPath = "HandBrakeCLI.exe" }
 if (-not [System.IO.Path]::IsPathRooted($Global:HbPath)) { $Global:HbPath = Join-Path $Global:ToolsDir $Global:HbPath }
 
-$Global:FfPath = $Global:MediaConfig['Tools']['Ffprobe']
+$Global:FfPath = Get-Cfg "Tools" "Ffprobe"
+if (-not $Global:FfPath) { $Global:FfPath = "ffprobe.exe" }
 if (-not [System.IO.Path]::IsPathRooted($Global:FfPath)) { $Global:FfPath = Join-Path $Global:ToolsDir $Global:FfPath }
 
 $Global:ValidExtensions = $Global:MediaConfig['ValidExtensions']
 
-# --- 2) LOGGING ---
+# --- 3) LOGGING ---
 $Global:ShrinkLogColumns = @("Date","InputPath","OutputPath","Strategy","Old_MB","New_MB","Saved_MB","Status","Detail","OrigVideo","NewVideo","OrigAudio","NewAudio","OrigDV","NewDV","Encode10","AudioPlan")
 
 function Write-MediaLog {
     param([string]$InputPath, [string]$OutputPath="-", [string]$Strategy="None", [double]$Old_MB=0, [double]$New_MB=0, [double]$Saved_MB=0, [string]$Status, [string]$Detail="", [string]$OrigVideo="", [string]$NewVideo="", [string]$OrigAudio="", [string]$NewAudio="", [int]$OrigDV=0, [int]$NewDV=0, [int]$Encode10=0, [string]$AudioPlan="")
     
-    $LogFile = $Global:MediaConfig['Logging']['ShrinkLogFile']
+    $LogFile = Get-Cfg "Logging" "ShrinkLogFile"
+    if (-not $LogFile) { $LogFile = "shrink_log.csv" }
+    
     $LogPath = if ([System.IO.Path]::IsPathRooted($LogFile)) { $LogFile } else { Join-Path $Global:ToolsDir $LogFile }
     
     $Payload = [pscustomobject]@{ Date=(Get-Date).ToString('yyyy-MM-dd HH:mm'); InputPath=$InputPath; OutputPath=$OutputPath; Strategy=$Strategy; Old_MB=$Old_MB; New_MB=$New_MB; Saved_MB=$Saved_MB; Status=$Status; Detail=$Detail; OrigVideo=$OrigVideo; NewVideo=$NewVideo; OrigAudio=$OrigAudio; NewAudio=$NewAudio; OrigDV=$OrigDV; NewDV=$NewDV; Encode10=$Encode10; AudioPlan=$AudioPlan } | Select-Object $Global:ShrinkLogColumns
@@ -64,13 +85,13 @@ function Write-MediaLog {
     }
 }
 
-# --- 3) HARDWARE ---
+# --- 4) HARDWARE ---
 $Global:EncoderName = "CPU"
 $EncoderArgs8 = @("-e","x265")
 $EncoderArgs10 = @("-e","x265_10bit")
 
 try {
-    $backend = $Global:MediaConfig['Media']['EncoderBackend']
+    $backend = Get-Cfg "Media" "EncoderBackend"
     if ($backend -eq "auto") { $backend = "x265" }
     switch ($backend) {
         "qsv" { 
@@ -84,12 +105,12 @@ try {
             $EncoderArgs10 = @("-e","nvenc_h265_10bit") 
         }
     }
-} catch {}
+} catch { Write-Warning "Hardware Detection Failed: $_" }
 
 $Global:MediaConfig['Media']["EncoderArgs8"] = $EncoderArgs8
 $Global:MediaConfig['Media']["EncoderArgs10"] = $EncoderArgs10
 
-# --- 4) HELPERS ---
+# --- 5) HELPERS ---
 function Get-JsonProp { 
     param($Obj, [string]$PropName, $Default=$null) 
     if($null -eq $Obj){return $Default} 
@@ -103,8 +124,8 @@ function Show-Popup {
 }
 
 function Test-MediaTools { 
-    if(-not (Test-Path -LiteralPath $Global:HbPath)){throw "HandBrake missing"}
-    if(-not (Test-Path -LiteralPath $Global:FfPath)){throw "FFprobe missing"} 
+    if(-not (Test-Path -LiteralPath $Global:HbPath)){throw "HandBrake missing at $Global:HbPath"}
+    if(-not (Test-Path -LiteralPath $Global:FfPath)){throw "FFprobe missing at $Global:FfPath"} 
 }
 
 function Invoke-FfprobeJson { 
@@ -113,7 +134,10 @@ function Invoke-FfprobeJson {
         $a = @("-v","error","-print_format","json") + $ArgsList + @("--", $Path)
         $j = & $Global:FfPath @a 2>$null
         if($j){return $j|ConvertFrom-Json} 
-    } catch {} 
+    } catch {
+        # FIX: Log failure instead of staying silent
+        Write-Warning "Ffprobe failed on '$Path': $($_.Exception.Message)"
+    } 
     return $null 
 }
 
@@ -147,14 +171,17 @@ function Normalize-LanguageTag {
 function Resolve-ScanPath { 
     param($p) 
     if([string]::IsNullOrWhiteSpace($p)){$p="."} 
-    # FIX: Use LiteralPath to support square brackets [] in filenames
+    # Use LiteralPath to support brackets []
     if(-not (Test-Path -LiteralPath $p)){throw "Path not found: $p"} 
     return (Resolve-Path -LiteralPath $p).Path 
 }
 
 function Get-PathFreeSpace { 
     param($p) 
-    try{ $r=[IO.Path]::GetPathRoot($p); $d=Get-PSDrive|?{$r -like "$($_.Name):*"}; if($d){return $d.Free} return 0 } catch {return 0} 
+    try{ $r=[IO.Path]::GetPathRoot($p); $d=Get-PSDrive|?{$r -like "$($_.Name):*"}; if($d){return $d.Free} return 0 } 
+    catch { 
+        Write-Warning "Space Check Failed for '$p': $_"; return 0 
+    } 
 }
 
 function Get-PrimaryVideoStream { 
@@ -249,10 +276,11 @@ function Get-BestAc3AudioTrackNum {
 }
 
 function Invoke-Cleanup {
-    if ($Global:MediaConfig.Contains('Shrink') -and $Global:MediaConfig['Shrink'].Contains('TempPath')) {
-        $t = $Global:MediaConfig['Shrink']['TempPath']
-        if (-not [string]::IsNullOrWhiteSpace($t) -and (Test-Path -LiteralPath $t)) {
-            Get-ChildItem -LiteralPath $t "hb_temp_*.mkv" | ? {$_.LastWriteTime -lt (Get-Date).AddHours(-24)} | Remove-Item -Force
-        }
+    $t = Get-Cfg "Shrink" "TempPath"
+    if (-not [string]::IsNullOrWhiteSpace($t) -and (Test-Path -LiteralPath $t)) {
+        # FIX: Use correct syntax: -Path for folder, -Filter for pattern
+        Get-ChildItem -Path $t -Filter "hb_temp_*.mkv" -File -ErrorAction SilentlyContinue | 
+            Where-Object { $_.LastWriteTime -lt (Get-Date).AddHours(-24) } | 
+            Remove-Item -Force -ErrorAction SilentlyContinue
     }
 }
